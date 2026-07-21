@@ -41,8 +41,25 @@ import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SignalWifiOff
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
+import androidx.compose.material3.Switch
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import android.content.SharedPreferences
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.layout.statusBarsPadding
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.Manifest
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -97,6 +114,69 @@ fun MainScreen() {
   val context = LocalContext.current
   val sharedPref = remember { context.getSharedPreferences("ParkingPrefs", Context.MODE_PRIVATE) }
   val initialUrl = remember { sharedPref.getString("custom_url", "https://parking.maldo.uk") ?: "https://parking.maldo.uk" }
+
+  var liveSaldo by remember { mutableStateOf(sharedPref.getString("last_fetched_saldo", "Cargando...") ?: "Cargando...") }
+
+  // Stay synced with the background service's fetches using a BroadcastReceiver
+  DisposableEffect(context) {
+    val receiver = object : android.content.BroadcastReceiver() {
+      override fun onReceive(ctx: android.content.Context?, intent: android.content.Intent?) {
+        val saldo = intent?.getStringExtra("saldo")
+        if (saldo != null) {
+          liveSaldo = saldo
+          sharedPref.edit().putString("last_fetched_saldo", saldo).apply()
+        }
+      }
+    }
+    val filter = android.content.IntentFilter("com.example.UPDATE_SALDO")
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+      context.registerReceiver(receiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
+    } else {
+      context.registerReceiver(receiver, filter)
+    }
+    onDispose {
+      context.unregisterReceiver(receiver)
+    }
+  }
+
+  // Active poller in-app to refresh balance every 60 seconds
+  LaunchedEffect(Unit) {
+    while (true) {
+      try {
+        val updated = withContext(Dispatchers.IO) {
+          fetchSaldoDirectly()
+        }
+        if (updated != null) {
+          sharedPref.edit().putString("last_fetched_saldo", updated).apply()
+          liveSaldo = updated
+        }
+      } catch (e: Exception) {
+        e.printStackTrace()
+      }
+      delay(60_000)
+    }
+  }
+
+  var isServiceEnabled by remember { mutableStateOf(sharedPref.getBoolean("service_enabled", false)) }
+
+  val permissionLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.RequestPermission()
+  ) { isGranted ->
+    if (isGranted) {
+      sharedPref.edit().putBoolean("service_enabled", true).apply()
+      isServiceEnabled = true
+      ParkingNotificationService.startService(context)
+      Toast.makeText(context, "Servicio de saldo activado", Toast.LENGTH_SHORT).show()
+    } else {
+      Toast.makeText(context, "Se requiere permiso de notificación para esta función", Toast.LENGTH_LONG).show()
+    }
+  }
+
+  LaunchedEffect(Unit) {
+    if (isServiceEnabled) {
+      ParkingNotificationService.startService(context)
+    }
+  }
 
   var webView by remember { mutableStateOf<WebView?>(null) }
   
@@ -306,13 +386,143 @@ fun MainScreen() {
             shape = RoundedCornerShape(12.dp)
           )
           
-          Spacer(modifier = Modifier.height(16.dp))
+          Spacer(modifier = Modifier.height(12.dp))
           
           Text(
             text = "Nota: La dirección debe comenzar con http:// o https://",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
           )
+          
+          Spacer(modifier = Modifier.height(16.dp))
+          HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+          Spacer(modifier = Modifier.height(16.dp))
+          
+          // Persistent Notification Section
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+          ) {
+            Row(
+              modifier = Modifier.weight(1f),
+              verticalAlignment = Alignment.CenterVertically
+            ) {
+              Icon(
+                imageVector = Icons.Default.Notifications,
+                contentDescription = null,
+                tint = if (isServiceEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                modifier = Modifier.size(24.dp)
+              )
+              Spacer(modifier = Modifier.width(12.dp))
+              Column {
+                Text(
+                  text = "Notificación de Saldo",
+                  style = MaterialTheme.typography.bodyMedium,
+                  fontWeight = FontWeight.Bold,
+                  color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                  text = "Actualiza el saldo cada minuto de forma persistente",
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+              }
+            }
+            
+            Switch(
+              checked = isServiceEnabled,
+              onCheckedChange = { checked ->
+                if (checked) {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                  } else {
+                    sharedPref.edit().putBoolean("service_enabled", true).apply()
+                    isServiceEnabled = true
+                    ParkingNotificationService.startService(context)
+                    Toast.makeText(context, "Servicio de saldo activado", Toast.LENGTH_SHORT).show()
+                  }
+                } else {
+                  sharedPref.edit().putBoolean("service_enabled", false).apply()
+                  isServiceEnabled = false
+                  ParkingNotificationService.stopService(context)
+                  Toast.makeText(context, "Servicio de saldo desactivado", Toast.LENGTH_SHORT).show()
+                }
+              },
+              modifier = Modifier.testTag("service_toggle_switch")
+            )
+          }
+
+          Spacer(modifier = Modifier.height(12.dp))
+          
+          Button(
+            onClick = {
+              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val hasPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                  context,
+                  Manifest.permission.POST_NOTIFICATIONS
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                
+                if (!hasPermission) {
+                  permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                  ParkingNotificationService.testNotification(context)
+                  Toast.makeText(context, "Prueba de notificación enviada", Toast.LENGTH_SHORT).show()
+                }
+              } else {
+                ParkingNotificationService.testNotification(context)
+                Toast.makeText(context, "Prueba de notificación enviada", Toast.LENGTH_SHORT).show()
+              }
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("test_notification_button"),
+            colors = ButtonDefaults.buttonColors(
+              containerColor = MaterialTheme.colorScheme.secondaryContainer,
+              contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+            ),
+            shape = RoundedCornerShape(10.dp)
+          ) {
+            Icon(
+              imageVector = Icons.Default.Notifications,
+              contentDescription = null,
+              modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+              text = "Probar Notificación Persistente",
+              style = MaterialTheme.typography.labelLarge,
+              fontWeight = FontWeight.Bold
+            )
+          }
+
+          val lastFetchedSaldo = sharedPref.getString("last_fetched_saldo", null)
+          if (lastFetchedSaldo != null) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+              modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                  color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                  shape = RoundedCornerShape(8.dp)
+                )
+                .padding(8.dp),
+              verticalAlignment = Alignment.CenterVertically
+            ) {
+              Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.size(16.dp)
+              )
+              Spacer(modifier = Modifier.width(8.dp))
+              Text(
+                text = "Último saldo: $lastFetchedSaldo",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+              )
+            }
+          }
         }
       },
       confirmButton = {
@@ -416,4 +626,53 @@ fun OfflineScreen(onRetry: () -> Unit) {
       )
     }
   }
+}
+
+// Helper methods to fetch real-time parking balance
+private fun fetchSaldoDirectly(): String? {
+  var connection: java.net.HttpURLConnection? = null
+  try {
+    val url = java.net.URL("https://parking.maldo.uk/saldo")
+    connection = url.openConnection() as java.net.HttpURLConnection
+    connection.requestMethod = "GET"
+    connection.connectTimeout = 8000
+    connection.readTimeout = 8000
+    connection.setRequestProperty("Accept", "application/json, text/plain, */*")
+    
+    val responseCode = connection.responseCode
+    if (responseCode == java.net.HttpURLConnection.HTTP_OK) {
+      val text = connection.inputStream.bufferedReader().use { it.readText() }.trim()
+      if (text.isEmpty()) return "Sin datos"
+      
+      if (text.startsWith("{")) {
+        try {
+          val json = org.json.JSONObject(text)
+          val keys = listOf("saldo", "balance", "amount", "value", "credit")
+          for (key in keys) {
+            if (json.has(key)) {
+              val value = json.optString(key)
+              return formatSaldoDirectly(value)
+            }
+          }
+          return text
+        } catch (e: Exception) {
+          return text
+        }
+      }
+      return formatSaldoDirectly(text)
+    }
+  } catch (e: Exception) {
+    e.printStackTrace()
+  } finally {
+    connection?.disconnect()
+  }
+  return null
+}
+
+private fun formatSaldoDirectly(raw: String): String {
+  val clean = raw.trim()
+  if (clean.matches(Regex("^[0-9]+([.,][0-9]+)?$"))) {
+    return "\$$clean"
+  }
+  return clean
 }

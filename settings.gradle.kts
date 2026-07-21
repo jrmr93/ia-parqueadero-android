@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Parking Maldo"
+rootProject.name = "ia-parqueadero"
 
 include(":app")
