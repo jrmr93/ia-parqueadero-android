@@ -1,5 +1,5 @@
 {
-  "name": "ia-parqueadero",
+  "name": "IA Parqueadero",
   "description": "Accede de forma rápida y sencilla al portal de parking.maldo.uk desde esta aplicación móvil.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
